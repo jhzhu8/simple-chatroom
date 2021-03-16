@@ -68,11 +68,11 @@ int main(int argc, char* argv[])
         size_t addrLen = sizeof(clientAddr);
         connect_fd = accept(listen_fd, (struct sockaddr *)&clientAddr, (socklen_t*)&addrLen);
         if(connect_fd < 0) {
-            printf("Failed to accept connection. Retrying.\n");
+            printf("ERROR: Failed to accept connection. Retrying.\n");
         }
 
         if(new_connection(connect_fd) < 0) {
-            printf("Failed to add fd %d to chatroom\n", connect_fd);
+            printf("ERROR: Failed to add fd %d to chatroom\n", connect_fd);
             close(connect_fd);
         }
     }

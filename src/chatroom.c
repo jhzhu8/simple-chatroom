@@ -46,7 +46,7 @@ typedef struct send_buff_s {
 } send_buff_t;
 
 typedef struct client_s {
-    char name[MAX_NAME_LEN+1]; // add space for :
+    char name[MAX_NAME_LEN+2]; // add space for ':' and ' '
     int fd;
     struct client_s* next;
     struct client_s* prev;
@@ -291,7 +291,11 @@ static int8_t insert_broadcast_msg(client_t* client, char* msg, uint8_t appendNa
         return -1;
     }
 
-    pthread_mutex_lock(&client->sendBuff->insertMutex);
+    if(pthread_mutex_lock(&client->sendBuff->insertMutex) < 0) {
+        printf("ERROR: Failed to lock mutex client %s\n", client->name);
+        return -1;
+    }
+
     uint8_t idx = client->sendBuff->insertIdx;
     send_buff_item_t* item = &client->sendBuff->buff[idx];
     char* insert = item->msg;
@@ -317,7 +321,11 @@ static int8_t insert_broadcast_msg(client_t* client, char* msg, uint8_t appendNa
     
     item->type = BROADCAST_MSG;
     client->sendBuff->insertIdx = (idx+1)%SEND_BUFF_LEN;
-    pthread_mutex_unlock(&client->sendBuff->insertMutex);
+    if(pthread_mutex_unlock(&client->sendBuff->insertMutex) < 0) {
+        printf("ERROR: Failed to unlock mutex client %s\n", client->name);
+        return -1;
+    }
+    
 
     if(sem_post(&client->sendBuff->full) < 0) {
         printf("ERROR: Failed to wait on empty sem client %s\n", client->name);
@@ -334,7 +342,11 @@ static int8_t insert_error_msg(client_t* client, char* msg, uint32_t len)
         return -1;
     }
 
-    pthread_mutex_lock(&client->sendBuff->insertMutex);
+    if(pthread_mutex_lock(&client->sendBuff->insertMutex) < 0) {
+        printf("ERROR: Failed to lock mutex client %s\n", client->name);
+        return -1;
+    }
+
     uint8_t idx = client->sendBuff->insertIdx;
     send_buff_item_t* item = &client->sendBuff->buff[idx];
 
@@ -344,7 +356,10 @@ static int8_t insert_error_msg(client_t* client, char* msg, uint32_t len)
     item->size = len;
     item->client = client;
     client->sendBuff->insertIdx = (idx+1)%SEND_BUFF_LEN;
-    pthread_mutex_unlock(&client->sendBuff->insertMutex);
+    if(pthread_mutex_unlock(&client->sendBuff->insertMutex) < 0) {
+        printf("ERROR: Failed to unlock mutex client %s\n", client->name);
+        return -1;
+    }
 
 
     if(sem_post(&client->sendBuff->full) < 0) {
@@ -451,7 +466,11 @@ int8_t add_client(int fd, chatroom_t* room, char* name)
     newClient->sendBuff = &room->sendBuff;
 
     // Add to client list
-    pthread_mutex_lock(&room->clientListMutex);
+    if(pthread_mutex_lock(&room->clientListMutex) < 0) {
+        printf("ERROR: Failed to lock client list mutex room %s\n", room->name);
+        delete_client(newClient);
+        return -1;
+    }
     if(room->clientList == NULL) {
         // Initializing client list
         room->clientList = newClient;
@@ -461,7 +480,11 @@ int8_t add_client(int fd, chatroom_t* room, char* name)
         newClient->prev = room->clientListTail;
         room->clientListTail = newClient;
     }
-    pthread_mutex_unlock(&room->clientListMutex);
+    if(pthread_mutex_unlock(&room->clientListMutex) < 0) {
+        printf("ERROR: Failed to unlock client list mutex room %s\n", room->name);
+        remove_client(newClient, room);
+        return -1;
+    }
 
     // Spawn thread
     if(pthread_create(&newClient->tid, NULL, chatroom_client, newClient)) {
@@ -479,7 +502,10 @@ static void add_chatroom(chatroom_t* room)
         return;
     }
 
-    pthread_mutex_lock(&room->clientListMutex);
+    if(pthread_mutex_lock(&room->clientListMutex) < 0) {
+        printf("ERROR: Failed to lock client list mutex room %s\n", room->name);
+        return;
+    }
 
     // Empty list
     if(chatroom_list_head == NULL) {
@@ -494,7 +520,10 @@ static void add_chatroom(chatroom_t* room)
         room->next = NULL;
     }
 
-    pthread_mutex_unlock(&room->clientListMutex);
+    if(pthread_mutex_unlock(&room->clientListMutex) < 0) {
+        printf("ERROR: Failed to unlock client list mutex room %s\n", room->name);
+        return;
+    }
 }
 
 // initialize chatroom
@@ -587,6 +616,7 @@ static int8_t init_client(int fd, char* roomName, char* clientName)
 static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
 {
     size_t len = strlen(msg);
+    size_t tokenLen = 0;
     char* token = strtok(msg, " ");
     if(token == NULL || strlen(msg) == len) {
         // No delimiter
@@ -603,6 +633,7 @@ static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
         return 1;
     }
     if(strlen(token) > MAX_NAME_LEN ) {
+        // Due to carriage return, the effective max length is 19 chars
         *roomName = NULL;
         *clientName = NULL;
         printf("ERROR: Room name too long %s\n", *roomName);
@@ -611,21 +642,34 @@ static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
     *roomName = token;
     printf("INFO: Got room name %s\n", *roomName);
 
-    
-
-    token = strtok(NULL, " \r\n");
+    token = strtok(NULL, " \n");
     if(token == NULL) {
-        printf("INFO: Got client name %s\n", *clientName);
+        printf("ERROR: No client name provided\n");
         *clientName = NULL;
         return -1;
     }
-    if(strlen(token) > MAX_NAME_LEN) {
+    tokenLen = strlen(token);
+    if(tokenLen > MAX_NAME_LEN) {
+        // Due to carriage return, the effective max length is 19 chars
         *clientName = NULL;
         *roomName = NULL;
-        printf("ERROR: Client name too long %s\n", *roomName);
+        printf("ERROR: Client name too long\n");
         return -1;
     }
+    // Remove carriage return if present
+    if(token[tokenLen-1] == '\r') {
+        token[tokenLen-1] = '\0';
+    }
     *clientName = token;
+
+    // Check if extra spaces in user name
+    token = strtok(NULL, " ");
+    if(token != NULL) {
+        *clientName = NULL;
+        *roomName = NULL;
+        printf("ERROR: Invalid client name\n");
+        return -1;
+    }
     printf("INFO: Got client name %s\n", *clientName);
 
     return 0;
@@ -637,7 +681,7 @@ static int8_t send_join_error_msg(int fd)
 
     if(send(fd, msg, strlen(msg), MSG_NOSIGNAL) != 0) {
         int err = errno;
-        printf("Failed to send error msg in response to invalid join with err=%d\n", err);
+        printf("ERROR: Failed to send error msg in response to invalid join with err=%d\n", err);
         return -1;
     }
 

@@ -376,7 +376,7 @@ static int32_t tokenize_msg(client_t* client, char* buff, uint32_t len)
 {
     uint32_t lenRemain = len;
     char* store = buff;
-    char* token = strtok(buff, "\n9");
+    char* token = strtok(buff, "\n");
     while(token != NULL) {
         size_t tokenSize = strlen(token);
         if(tokenSize == lenRemain) {
@@ -396,7 +396,7 @@ static int32_t tokenize_msg(client_t* client, char* buff, uint32_t len)
             printf("ERROR: Failed to add broadcast msg to buffer for client %s\n", client->name);
             return -1;
         }        
-        token = strtok(NULL, "\n9");
+        token = strtok(NULL, "\n");
     }
 
     // move the remaining chars to front of buffer
@@ -653,7 +653,7 @@ static int16_t parse_join_msg(char* msg, char** clientName, char** roomName)
     *roomName = token;
     printf("INFO: Got room name %s\n", *roomName);
 
-    token = strtok(NULL, "\n9");
+    token = strtok(NULL, "\n");
     if(token == NULL) {
         // No client name, keep recv
         *clientName = NULL;

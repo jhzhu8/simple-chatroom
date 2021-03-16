@@ -9,7 +9,7 @@ LIBS = -lpthread
 
 OBJS = $(SRC: .c=.o)
 
-MAIN = chat_server
+MAIN = yak_room
 
 .PHONY: depend clean
 

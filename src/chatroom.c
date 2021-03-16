@@ -619,16 +619,22 @@ static int8_t init_client(int fd, char* roomName, char* clientName, char* buff)
 // Returns join message length (including null char) if success
 // Returns 0 if keep recv
 // Returns -1 if error
-static int16_t parse_join_msg(char* msg, char** clientName, char** roomName)
+static int16_t parse_join_msg(char* msg, size_t len, char** clientName, char** roomName)
 {
-    size_t len = strlen(msg); // total message length
     size_t joinMsgLen = 0;
     size_t tokenLen = 0;
-    char* token = strtok(msg, " ");
+    char* token = strtok(msg+joinMsgLen, " ");
     tokenLen = strlen(token); // token will never be null on first strtok call
     if(tokenLen == len) {
         // No delimiter
-        return 0;
+        if(strchr(token, '\n') == NULL) {
+            // If no \n --> fragmented, need to retry
+            return 0;
+        } else {
+            printf("ERROR: Invalid message header %s\n", token);
+            return -1;
+        }
+        
     }
     if(strcmp(token, "JOIN") != 0) {
         printf("ERROR: Invalid message header %s\n", token);
@@ -636,10 +642,16 @@ static int16_t parse_join_msg(char* msg, char** clientName, char** roomName)
     }
     joinMsgLen += strlen(token) + 1; // +1 include null char
 
-    token = strtok(NULL, " ");
-    if(token == NULL) {
-        // No room name, keep recv
-        return 0;
+    token = strtok(msg+joinMsgLen, " ");
+    if(strlen(token) == (len-joinMsgLen)) {
+        // No room name
+        if(strchr(token, '\n') == NULL) {
+            // If no \n --> fragmented, need to retry
+            return 0;
+        } else {
+            printf("ERROR: Invalid JOIN msg\n");
+            return -1;
+        }
     }
     tokenLen = strlen(token);
     if(strlen(token) > MAX_NAME_LEN ) {
@@ -653,8 +665,8 @@ static int16_t parse_join_msg(char* msg, char** clientName, char** roomName)
     *roomName = token;
     printf("INFO: Got room name %s\n", *roomName);
 
-    token = strtok(NULL, "\n");
-    if(token == NULL) {
+    token = strtok(msg+joinMsgLen, "\n");
+    if(strlen(token) == (len-joinMsgLen)) {
         // No client name, keep recv
         *clientName = NULL;
         *roomName = NULL;
@@ -733,7 +745,7 @@ int8_t new_connection(int fd)
 
         // Extract room name and client name from message
         // ret == 1 --> fragmented packet, keep recv
-        joinMsgSize = parse_join_msg(buff, &clientName, &roomName);
+        joinMsgSize = parse_join_msg(buff, numBytes, &clientName, &roomName);
         if(joinMsgSize < 0) {
             // Invalid
             printf("ERROR: Invalid JOIN msg. Sending error and closing\n");

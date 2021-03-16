@@ -7,3 +7,4 @@
 	- if not port_num specified, 1234 is used
 - There is some logic to handle \r for testing with telnet
 	- hopefully shouldn't affect normal operation
+- It is assumed that clients send their first message in a timely manner after connecting

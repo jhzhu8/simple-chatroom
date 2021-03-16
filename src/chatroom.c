@@ -15,8 +15,9 @@
 
 #define SEND_BUFF_LEN       (32)
 #define MAX_MSG_SIZE        (20000)
-#define JOIN_BUFF_SIZE      (100)
 #define MIN_JOIN_MSG_LEN    (8)
+#define MAX_JOIN_MSG_LEN    (MAX_NAME_LEN*2 + strlen("JOIN") + 3) // +4 for two spaces and \r\n
+#define JOIN_BUFF_SIZE      (MAX_JOIN_MSG_LEN)
 #define MAX_NAME_LEN        (20)
 #define SEM_PSHARE          (0) // semaphore within a process
 
@@ -220,7 +221,7 @@ void* chatroom_sender(void* input)
                 // Send error message to specified client
                 if(send(item->client->fd, item->msg, item->size, MSG_NOSIGNAL) != 0) {
                     int err = errno; 
-                    printf("Failed to send error msg on socket to client in room %s with err=%d\n", 
+                    printf("ERROR: Failed to send error msg on socket to client in room %s with err=%d\n", 
                             room->name, err);
                     pthread_cancel(item->client->tid);
                     remove_client(item->client, room);
@@ -237,7 +238,7 @@ void* chatroom_sender(void* input)
                 if(it->isActive == 1) {
                     if(send(it->fd, item->msg, item->size, MSG_NOSIGNAL) < 0) {
                         int err = errno; 
-                        printf("Failed to send msg on socket to client %s in room %s with err=%d\n", 
+                        printf("ERROR: Failed to send msg on socket to client %s in room %s with err=%d\n", 
                             it->name, room->name, err);
                         // Close the client
                         pthread_cancel(it->tid);
@@ -272,11 +273,17 @@ void* chatroom_sender(void* input)
     return NULL;
 }
 
-static int8_t insert_broadcast_msg(client_t* client, char* msg, uint32_t len, uint8_t appendName)
+static int8_t insert_broadcast_msg(client_t* client, char* msg, uint8_t appendName)
 {
+    size_t len = strlen(msg);
     if(len > (MAX_MSG_SIZE-1)-(strlen(client->name)+1)) { // -1 compensates for extra \n
         printf("ERROR: Message size too large from %s\n", client->name);
         return -1;
+    }
+
+    if(len == 0) {
+        // Discard empty msg but don't fail
+        return 0;
     }
     
     if(sem_wait(&client->sendBuff->empty) < 0) {
@@ -354,9 +361,13 @@ static int32_t tokenize_msg(client_t* client, char* buff, uint32_t len)
 {
     uint32_t lenRemain = len;
     char* store = buff;
-    char* token = strtok(buff, "\n");
+    char* token = strtok(buff, "\n9");
     while(token != NULL) {
         size_t tokenSize = strlen(token);
+        if(tokenSize == lenRemain) {
+            // Handle if there are no \n in the whole string
+            break;
+        }
         lenRemain -= tokenSize+1; // +1 for the NULL char inputted
         store += tokenSize+1;
 
@@ -366,8 +377,8 @@ static int32_t tokenize_msg(client_t* client, char* buff, uint32_t len)
             tokenSize--;
         }
         
-        if(insert_broadcast_msg(client, token, tokenSize, 1) != 0) {
-            printf("Error: Failed to add broadcast msg to buffer for client %s\n", client->name);
+        if(insert_broadcast_msg(client, token, 1) != 0) {
+            printf("ERROR: Failed to add broadcast msg to buffer for client %s\n", client->name);
             return -1;
         }        
         token = strtok(NULL, "\n");
@@ -391,7 +402,7 @@ void* chatroom_client(void* input)
         printf("ERROR: Client %s failed to construct has joined msg\n", client->name);
         return NULL;
     }
-    insert_broadcast_msg(client, recvBuff, joinMsgSize, 0); // do not include terminating null char
+    insert_broadcast_msg(client, recvBuff, 0);
     
     ssize_t numBytes = 0;
     int32_t leftOver = 0;
@@ -549,7 +560,7 @@ static int8_t init_client(int fd, char* roomName, char* clientName)
         // Found active chatroom
         // Just add new client to it
         if(add_client(fd, room, clientName) != 0) {
-            printf("Failed to add client %s to %s\n", clientName, roomName);
+            printf("ERROR: Failed to add client %s to %s\n", clientName, roomName);
             return -1;
         }
     } else {
@@ -562,7 +573,7 @@ static int8_t init_client(int fd, char* roomName, char* clientName)
 
         // Add first client
         if(add_client(fd, room, clientName) != 0) {
-            printf("Failed to initialize first client %s to %s\n", clientName, roomName);
+            printf("ERROR: Failed to initialize first client %s to %s\n", clientName, roomName);
             return -1;
         }
     }
@@ -570,59 +581,52 @@ static int8_t init_client(int fd, char* roomName, char* clientName)
     return 0;
 }
 
-// Tokenize
+// Returns 1 if incomplete
+// Returns 0 if succesfully parsed
+// Returns -1 if error
 static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
 {
-    if(strlen(msg) < MIN_JOIN_MSG_LEN) {
-        printf("ERROR: Join message too short\n");
-        return -1;
-    }
-
+    size_t len = strlen(msg);
     char* token = strtok(msg, " ");
-    if(token == NULL || strcmp(token, "JOIN") != 0) {
+    if(token == NULL || strlen(msg) == len) {
+        // No delimiter
+        return 1;
+    }
+    if(strcmp(token, "JOIN") != 0) {
         printf("ERROR: Invalid message header %s\n", token);
         return -1;
     }
 
+    token = strtok(NULL, " ");
+    if(token == NULL) {
+        // Incomplete
+        return 1;
+    }
+    if(strlen(token) > MAX_NAME_LEN ) {
+        *roomName = NULL;
+        *clientName = NULL;
+        printf("ERROR: Room name too long %s\n", *roomName);
+        return -1;
+    }
+    *roomName = token;
+    printf("INFO: Got room name %s\n", *roomName);
+
+    
+
     token = strtok(NULL, " \r\n");
     if(token == NULL) {
-        printf("ERROR: No room name present\n");
+        printf("INFO: Got client name %s\n", *clientName);
+        *clientName = NULL;
+        return -1;
+    }
+    if(strlen(token) > MAX_NAME_LEN) {
+        *clientName = NULL;
+        *roomName = NULL;
+        printf("ERROR: Client name too long %s\n", *roomName);
         return -1;
     }
     *clientName = token;
     printf("INFO: Got client name %s\n", *clientName);
-
-    if(strlen(*clientName) > MAX_NAME_LEN ) {
-        *clientName = NULL;
-        *roomName = NULL;
-        printf("Client name too long %s\n", *clientName);
-        return -1;
-    }
-
-    token = strtok(NULL, " \r\n");
-    if(token == NULL) {
-        printf("INFO: Got room name %s\n", *roomName);
-        *clientName = NULL;
-        return -1;
-    }
-    *roomName = token;
-
-    token = strtok(NULL, " \r\n");
-    if(token != NULL) {
-        printf("ERROR: Room name with space\n");
-        *clientName = NULL;
-        *roomName = NULL;
-        return -1;
-    }    
-
-    if(strlen(*roomName) > MAX_NAME_LEN) {
-        *clientName = NULL;
-        *roomName = NULL;
-        printf("Room name too long %s\n", *roomName);
-        return -1;
-    }
-
-    //printf("Client: %s Room: %s\n", *clientName, *roomName);
 
     return 0;
 }
@@ -649,31 +653,48 @@ int8_t new_connection(int fd)
     tv.tv_usec = 0;
     if(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv) != 0) {
         int err = errno;
-        printf("Failed to set timeout on fd %d with err=%d\n", fd, err);
+        printf("ERROR: Failed to set timeout on fd %d with err=%d\n", fd, err);
         return -1;
     }
 
-    // Receive first message
+    // Attempt to receive proper JOIN message
     ssize_t numBytes = 0;
-    char buff[JOIN_BUFF_SIZE];
-    numBytes = recv(fd, buff, JOIN_BUFF_SIZE-1, 0); // -1 so we can add null char
-    if(numBytes <= 0) {
-        int err = errno;
-        printf("ERROR: Failed to receive join msg on fd %d with err=%d\n", fd, err);
-        return -1;
-    }
-
-    // Append null char
-    buff[numBytes] = '\0';
-
-    // Extract room name and client name from message
+    char buff[JOIN_BUFF_SIZE+1]; // +1 so we can add null char
     char* clientName = NULL;
     char* roomName = NULL;
-    if(parse_join_msg(buff, &clientName, &roomName) != 0) {
-        printf("ERROR: Invalid JOIN msg. Sending error and closing\n");
-        send_join_error_msg(fd);
-        return -1;
+
+    while(1) {
+        numBytes += recv(fd, buff+numBytes, sizeof(buff)-numBytes, 0); // -1 so we can add null char
+        if(numBytes <= 0) {
+            int err = errno;
+            printf("ERROR: Failed to receive join msg on fd %d with err=%d\n", fd, err);
+            return -1;
+        }
+
+        // Append null char
+        buff[numBytes] = '\0';
+
+        // Extract room name and client name from message
+        // ret == 1 --> fragmented packet, keep recv
+        int8_t ret = parse_join_msg(buff, &clientName, &roomName);
+        if(ret < 0) {
+            // Invalid
+            printf("ERROR: Invalid JOIN msg. Sending error and closing\n");
+            send_join_error_msg(fd);
+            return -1;
+        } else if(ret == 0) {
+            // Succesfully found JOIN 
+            break;
+        }
+
+        // Sanity check
+        if(numBytes >= MAX_JOIN_MSG_LEN) {
+            printf("ERROR: JOIN msg exceeds max length\n");
+            send_join_error_msg(fd);
+            return -1;
+        }
     }
+    
 
     // Initialize the client connection
     if(init_client(fd, roomName, clientName) != 0) {

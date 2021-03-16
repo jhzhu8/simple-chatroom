@@ -28,6 +28,7 @@ int main(int argc, char* argv[])
             printf("ERROR: Invalid port. Please pick port between %u and %u\n", TCP_PORT_MIN, TCP_PORT_MAX);
             return -1;
         }
+        printf("INFO: Using desired port %u\n", port);
     } else {
         port = 1234;
         printf("INFO: Using default port %u\n", port);

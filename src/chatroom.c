@@ -20,6 +20,8 @@
 #define MAX_NAME_LEN        (20)
 #define SEM_PSHARE          (0) // semaphore within a process
 
+typedef struct client_s client_t;
+
 typedef enum {
     BROADCAST_MSG,
     ERROR_MSG,
@@ -30,7 +32,7 @@ typedef struct send_buff_item_s {
     char msg[MAX_MSG_SIZE];
     uint16_t size;
     msg_type_t type;
-    int fd;     // ignored for broadcast msg
+    client_t* client;     // ignored for broadcast msg
 } send_buff_item_t;
 
 typedef struct send_buff_s {
@@ -108,7 +110,6 @@ static void remove_chatroom(chatroom_t* room)
     }
 
     close_chatroom(room);
-
 }
 
 // Return NULL if none found
@@ -215,12 +216,19 @@ void* chatroom_sender(void* input)
         send_buff_item_t* item = &room->sendBuff.buff[idx];
 
         if(item->type == ERROR_MSG) {
-            // Send error message to specified client
-            if(send(item->fd, item->msg, item->size, MSG_NOSIGNAL) != 0) {
-                int err = errno; 
-                printf("Failed to send error msg on socket to client in room %s with err=%d\n", 
-                        room->name, err);
+            if(item->client->isActive == 1) {
+                // Send error message to specified client
+                if(send(item->client->fd, item->msg, item->size, MSG_NOSIGNAL) != 0) {
+                    int err = errno; 
+                    printf("Failed to send error msg on socket to client in room %s with err=%d\n", 
+                            room->name, err);
+                    pthread_cancel(item->client->tid);
+                    remove_client(item->client, room);
+                }
+            } else {
+                remove_client(item->client, room);
             }
+            
         } else if(item->type == BROADCAST_MSG) {
             // Iterate through the client list and broadcast to all clients
             pthread_mutex_lock(&room->clientListMutex);
@@ -260,7 +268,7 @@ void* chatroom_sender(void* input)
             break;
         }
     }
-
+    remove_chatroom(room);
     return NULL;
 }
 
@@ -327,7 +335,7 @@ static int8_t insert_error_msg(client_t* client, char* msg, uint32_t len)
 
     item->type = ERROR_MSG;
     item->size = len;
-    item->fd = client->fd;
+    item->client = client;
     client->sendBuff->insertIdx = (idx+1)%SEND_BUFF_LEN;
     pthread_mutex_unlock(&client->sendBuff->insertMutex);
 
@@ -401,7 +409,7 @@ void* chatroom_client(void* input)
         uint32_t totalSize = leftOver+numBytes;        
         // Append null char
         recvBuff[totalSize] = '\0';
-        printf("Recvd: %s\n", recvBuff+leftOver);
+        //printf("Recvd: %s\n", recvBuff+leftOver);
 
         // Split recvd data into messages
         leftOver = tokenize_msg(client, recvBuff, totalSize);
@@ -460,15 +468,22 @@ static void add_chatroom(chatroom_t* room)
         return;
     }
 
+    pthread_mutex_lock(&room->clientListMutex);
+
     // Empty list
     if(chatroom_list_head == NULL) {
         chatroom_list_head = room;
         chatroom_list_tail = room;
+        room->prev = NULL;
+        room->next = NULL;
     } else {
         chatroom_list_tail->next = room;
         room->prev = chatroom_list_tail;
         chatroom_list_tail = room;
+        room->next = NULL;
     }
+
+    pthread_mutex_unlock(&room->clientListMutex);
 }
 
 // initialize chatroom
@@ -577,6 +592,13 @@ static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
     *clientName = token;
     printf("INFO: Got client name %s\n", *clientName);
 
+    if(strlen(*clientName) > MAX_NAME_LEN ) {
+        *clientName = NULL;
+        *roomName = NULL;
+        printf("Client name too long %s\n", *clientName);
+        return -1;
+    }
+
     token = strtok(NULL, " \r\n");
     if(token == NULL) {
         printf("INFO: Got room name %s\n", *roomName);
@@ -591,14 +613,7 @@ static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
         *clientName = NULL;
         *roomName = NULL;
         return -1;
-    }
-
-    if(strlen(*clientName) > MAX_NAME_LEN ) {
-        *clientName = NULL;
-        *roomName = NULL;
-        printf("Client name too long %s\n", *clientName);
-        return -1;
-    }
+    }    
 
     if(strlen(*roomName) > MAX_NAME_LEN) {
         *clientName = NULL;
@@ -607,7 +622,7 @@ static int8_t parse_join_msg(char* msg, char** clientName, char** roomName)
         return -1;
     }
 
-    printf("Client: %s Room: %s\n", *clientName, *roomName);
+    //printf("Client: %s Room: %s\n", *clientName, *roomName);
 
     return 0;
 }
